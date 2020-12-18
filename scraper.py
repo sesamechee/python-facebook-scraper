@@ -48,6 +48,7 @@ class CollectPosts(object):
   def collect(self, typ):
     if typ == "pages":
       for iden in self.ids:
+        self.collect_page_information(iden)
         self.collect_page(iden)
     self.browser.close()
 
@@ -86,10 +87,12 @@ class CollectPosts(object):
 
   def get_soup (self):
     return BeautifulSoup(self.browser.page_source, "lxml")
+  
+  def scroll_page_to_elem (self, elem) :
+    self.browser.execute_script('arguments[0].scrollIntoView({ block: "center" })', elem)
 
   def collect_page(self, page):
     self.browser.get('https://www.facebook.com/' + page + '/')
-
     time.sleep(self.delay)
 
     while self.current < self.depth :
@@ -109,7 +112,7 @@ class CollectPosts(object):
           if self.safe_find_element_by_id(postLabelList[0]) is not None :
             postLinkElem = self.safe_find_element_by_xpath('//*[@id="'+ postLabelList[0] +'"]//a')
             if postLinkElem is not None :
-              self.browser.execute_script('arguments[0].scrollIntoView({ block: "center" })', postLinkElem)
+              self.scroll_page_to_elem(postLinkElem)
               ActionChains(self.browser).move_to_element(postLinkElem).perform()
               time.sleep(self.delay)
             soup = self.get_soup()
@@ -124,7 +127,7 @@ class CollectPosts(object):
           if self.safe_find_element_by_id(postLabelList[1]) is not None :
             readmoreElem = self.safe_find_element_by_xpath('//*[@id="' + postLabelList[1] + '"]//*[text()="查看更多"]')
             if readmoreElem is not None:
-              self.browser.execute_script('arguments[0].scrollIntoView({ block: "center" })', readmoreElem)
+              self.scroll_page_to_elem(readmoreElem)
               ActionChains(self.browser).move_to_element(readmoreElem).click().perform()
             caption = self.browser.find_element_by_id(postLabelList[1]).text
             
@@ -154,7 +157,7 @@ class CollectPosts(object):
             # Open Emoji Popup
             emojiToolElem = self.safe_find_element_by_xpath('//*[@id="'+ postLabelList[3] +'"]/span')
             if emojiToolElem is not None :
-              self.browser.execute_script('arguments[0].scrollIntoView({ block: "center" })', emojiToolElem)
+              self.scroll_page_to_elem(emojiToolElem)
               ActionChains(self.browser).move_to_element(emojiToolElem).click().perform()
               time.sleep(self.delay)
               soup = self.get_soup()
@@ -165,8 +168,9 @@ class CollectPosts(object):
                 emojiTypeList[emojiSrcName]['val'] = int(emojiItem.text.replace(',', ''))
 
               # Close Emoji Popup
-              emojiClose = self.browser.find_element_by_xpath('//div[@role="button"][@aria-label="關閉"]')
-              ActionChains(self.browser).move_to_element(emojiClose).click().perform()
+              emojiClose = self.safe_find_element_by_xpath('//div[@role="button"][@aria-label="關閉"]')
+              if emojiClose is not None :
+                ActionChains(self.browser).move_to_element(emojiClose).click().perform()
 
           postObj = {
               'user_id': page,
@@ -194,6 +198,51 @@ class CollectPosts(object):
     self.browser.execute_script('window.scrollTo(0, document.body.scrollHeight)')
     time.sleep(self.delay)
 
+  def collect_page_information(self, page):
+    self.browser.get('https://www.facebook.com/' + page + '/about')
+    time.sleep(self.delay)
+
+    # Click all read more
+    readmoreElem = self.browser.find_elements_by_xpath('//*[text()="查看更多"]')
+    for item in readmoreElem :
+      self.scroll_page_to_elem(item)
+      ActionChains(self.browser).move_to_element(item).click().perform()
+
+    # Get like count
+    like_count = 0
+    likeElem = self.safe_find_element_by_xpath('//div[@class="qzhwtbm6 knvmm38d"][.//*[contains(text(), "對此讚好")]]')
+    if likeElem is not None :
+      like_count = re.findall(r"\d+", likeElem.text.replace(',', ''))[0]
+
+    # Get like count
+    followers = 0
+    followersElem = self.safe_find_element_by_xpath('//div[@class="qzhwtbm6 knvmm38d"][.//*[contains(text(), "人在追蹤")]]')
+    if followersElem is not None :
+      followers = re.findall(r"\d+", followersElem.text.replace(',', ''))[0]
+
+    # Get checkin
+    checkin = 0
+    checkinElem = self.safe_find_element_by_xpath('//div[@class="qzhwtbm6 knvmm38d"][.//*[contains(text(), "曾在這裡簽到")]]')
+    if checkinElem is not None :
+      checkin = re.findall(r"\d+", checkinElem.text.replace(',', ''))[0]
+
+    # Get biography
+    biography = ''
+    biographyElem = self.safe_find_element_by_xpath('//div[@class="kvgmc6g5 cxmmr5t8 oygrvhab hcukyx3x c1et5uql"]')
+    if biographyElem is not None :
+      biography = biographyElem.text
+
+    page_info = {
+      'user_id': page,
+      'like_count': like_count,
+      'checkin_count': checkin,
+      'followers': followers,
+      'biography': biography,
+      'last_updated_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    }
+
+    self.insert_db_page(page_info)
+
   def extract_post_id (self, link) :
     return list(filter(None, link.split('/')))[-1]
 
@@ -204,6 +253,45 @@ class CollectPosts(object):
       return 'photos'
     else :
       return 'posts'
+
+  def insert_db_page(self, pageObj):
+    print(pageObj)
+    # Check Duplicate Post by user_id
+    self.dbcursor.execute("SELECT * FROM facebook WHERE user_id = '"+ pageObj['user_id'] +"'")
+    sqlpage = self.dbcursor.fetchall()
+
+    if len(sqlpage) > 0:
+      # Update Post
+      sql = """UPDATE facebook SET
+                like_count = %s,
+                checkin_count = %s,
+                followers = %s,
+                last_updated_date = %s
+                WHERE user_id = """ + "'" + pageObj['user_id'] + "'"
+      val = (pageObj['like_count'],
+             pageObj['checkin_count'],
+             pageObj['followers'],
+             pageObj['last_updated_date'])
+      self.dbcursor.execute(sql, val)
+      self.db.commit()
+    else :
+      # Insert Post
+      sql = """INSERT INTO facebook(
+                user_id,
+                biography,
+                like_count,
+                checkin_count,
+                followers,
+                last_updated_date)
+                VALUES (%s, %s, %s, %s, %s, %s)"""
+      val = (pageObj['user_id'],
+             pageObj['biography'],
+             pageObj['like_count'],
+             pageObj['checkin_count'],
+             pageObj['followers'],
+             pageObj['last_updated_date'])
+      self.dbcursor.execute(sql, val)
+      self.db.commit()
 
   def insert_db_post (self, postObj) :
     # Check Duplicate Post by post_id
