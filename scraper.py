@@ -6,9 +6,13 @@ import mysql.connector
 from bs4 import BeautifulSoup
 from datetime import datetime
 from selenium import webdriver
-from selenium.common.exceptions import NoSuchElementException, TimeoutException
+from selenium.common.exceptions import NoSuchElementException, TimeoutException, ElementClickInterceptedException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.support.wait import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.by import By
+from urllib.parse import urlparse, parse_qsl
 
 class CollectPosts(object):
 
@@ -48,8 +52,11 @@ class CollectPosts(object):
   def collect(self, typ):
     if typ == "pages":
       for iden in self.ids:
-        self.collect_page_information(iden)
         self.collect_page(iden)
+        self.collect_posts(iden)
+    elif typ == "comments":
+      for iden in self.ids:
+        self.collect_comments(iden)
     self.browser.close()
 
   def login(self, email, password):
@@ -91,7 +98,7 @@ class CollectPosts(object):
   def scroll_page_to_elem (self, elem) :
     self.browser.execute_script('arguments[0].scrollIntoView({ block: "center" })', elem)
 
-  def collect_page(self, page):
+  def collect_posts(self, page):
     self.browser.get('https://www.facebook.com/' + page + '/')
     time.sleep(self.delay)
 
@@ -198,7 +205,106 @@ class CollectPosts(object):
     self.browser.execute_script('window.scrollTo(0, document.body.scrollHeight)')
     time.sleep(self.delay)
 
-  def collect_page_information(self, page):
+  def collect_comments(self, postId):
+    self.browser.get('https://www.facebook.com/' + postId + '/')
+    time.sleep(self.delay)
+
+    postElem = '//div[@class="d2edcug0 oh7imozk tr9rh885 abvwweq7 ejjq64ki"]'
+
+    # Click filter options
+    commentFilterElem = self.safe_find_element_by_xpath(postElem + '//div[@class="h3fqq6jp hcukyx3x oygrvhab cxmmr5t8 kvgmc6g5 j83agx80 bp9cbjyn"]')
+    if commentFilterElem is not None:
+      self.scroll_page_to_elem(commentFilterElem)
+      commentFilterElem.click()
+      time.sleep(self.delay)
+
+    # Click filter all comments
+    try :
+      allcommentElem = WebDriverWait(self.browser, 8).until(EC.visibility_of_element_located((By.XPATH, '//div[@class="j34wkznp qp9yad78 pmk7jnqg kr520xx4"]//div[@role="menuitem"][last ()]')))
+      allcommentElem.click()
+      time.sleep(self.delay)
+    except TimeoutException:
+      print('TimeoutException')
+
+    # Click all total comments
+    i = 0
+    while True:
+      try :
+        WebDriverWait(self.browser, 8).until_not(EC.presence_of_element_located((By.XPATH, postElem + '//div[@class="j83agx80 fv0vnmcu hpfvmrgz"]')))
+        loadElem = WebDriverWait(self.browser, 2).until(EC.visibility_of_element_located((By.XPATH, postElem + '//div[@role="button"][.//*[text()="查看更多回應" OR contains(text(), "檢視另")]]')))
+        self.scroll_page_to_elem(loadElem)
+        loadElem.click()
+        time.sleep(self.delay)
+        i += 1
+        print('click more: ' + str(i))
+      except ElementClickInterceptedException:
+        print('ElementClickInterceptedException')
+        break
+      except TimeoutException:
+        print('TimeoutException')
+        break
+    
+    # 1st level Hover
+    comments = self.browser.find_elements_by_xpath(postElem + '//*[@class="cwj9ozl2 tvmbv18p"]/ul/li')
+    for comment in comments:
+      self.scroll_page_to_elem(comment)
+      ActionChains(self.browser).move_to_element(comment).perform()
+
+    # 2nd level expand
+    # replies = comments.find_elements_by_xpath(postElem + '//*[@class="cwj9ozl2 tvmbv18p"]/ul/li//div[@role="button"][.//*[contains(text(), "對此讚好")]]')
+    # for reply in replies:
+    #   self.scroll_page_to_elem(reply)
+    #   ActionChains(self.browser).move_to_element(reply).perform()
+
+    # Click all read more
+    readmoreElem = self.browser.find_elements_by_xpath(postElem + '//*[text()="查看更多"]')
+    for item in readmoreElem:
+      self.scroll_page_to_elem(item)
+      ActionChains(self.browser).move_to_element(item).click().perform()
+
+    soup = self.get_soup()
+    commentsList = soup.select('div.d2edcug0.oh7imozk.tr9rh885.abvwweq7.ejjq64ki div.cwj9ozl2.tvmbv18p > ul > li')
+
+    # Get reaction
+    comments = self.browser.find_elements_by_xpath(postElem + '//div[@class="cwj9ozl2 tvmbv18p"]/ul/li')
+    for comment in comments:
+      print(comment)
+      try:
+        reaction = comment.find_element_by_xpath('.//div[@class="hyh9befq hn33210v jkio9rs9"]')
+        print(reaction)
+      except:
+        print('no element')
+      # self.scroll_page_to_elem(reaction)
+      # ActionChains(self.browser).move_to_element(reaction).perform()
+
+    # Get post id + link + type + date
+    for comment in commentsList:
+      link = comment.select_one('a.m9osqain.gpro0wi8.knj5qynh')['href']
+      query = self.extract_comment_id(link)
+      typename = 'media' if comment.find('div', 'j83agx80 bvz0fpym c1et5uql') else 'text'
+      caption = comment.find('div', 'ecm0bbzt e5nlhep0 a8c37x1j').text
+      reaction = comment.find('div', 'bp9cbjyn fni8adji hgaippwi')
+        
+      commentObj = {
+        'comment_id': query['comment_id'],
+        'reply_comment_id': query['reply_comment_id'],
+        'typename': typename,
+        'caption': caption,
+        'link': 'https://www.facebook.com/' + query['comment_id'],
+        # 'like_count': 0,
+        # 'heart_count': 0,
+        # 'haha_count': 0,
+        # 'hug_count': 0,
+        # 'angry_count': 0,
+        # 'wow_count': 0,
+        # 'sad_count': 0,
+        # 'post_created_date': post_created_date.strftime('%Y-%m-%d %H:%M:%S'),
+        'last_updated_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+      }
+
+      self.insert_db_comment(commentObj)
+
+  def collect_page(self, page):
     self.browser.get('https://www.facebook.com/' + page + '/about')
     time.sleep(self.delay)
 
@@ -253,6 +359,14 @@ class CollectPosts(object):
       return 'photos'
     else :
       return 'posts'
+
+  def extract_comment_id (self, link):
+    parsed_url = urlparse(link)
+    query = dict(parse_qsl(parsed_url.query))
+    return {
+      'comment_id': query.get('comment_id', None),
+      'reply_comment_id': query.get('reply_comment_id', None)
+    }
 
   def insert_db_page(self, pageObj):
     print(pageObj)
@@ -362,3 +476,6 @@ class CollectPosts(object):
              postObj['last_updated_date'])
       self.dbcursor.execute(sql, val)
       self.db.commit()
+
+  def insert_db_comment (self, commentObj):
+    print(commentObj)
